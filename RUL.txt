@@ -1,0 +1,341 @@
+# -*- coding: utf-8 -*-
+# ====================================================================================
+# Abstract: Calculates the MODEL for the RUL function.
+#
+# Inputs:
+#   Context:
+#
+#   Variables (inc global):
+#				n/a
+# Outputs:
+#   Context:
+#				
+#   Variables:
+#				outFileU - (String) Location of text file with calculation output. 
+#               
+#
+# Change History:
+# Date				By					 Reason
+# 26-MAI-2023		Gabrielly Costa		 Initial_version
+# ====================================================================================
+
+# Plot and Data Process Libs
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import time
+import cmocean
+import graphviz
+
+# Decision Tree Libs
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+from sklearn.metrics import roc_auc_score, accuracy_score, precision_score, recall_score
+from sklearn.metrics import classification_report
+from sklearn import metrics
+from sklearn.model_selection import train_test_split
+from sklearn import ensemble
+from sklearn import tree
+from sklearn.tree import export_graphviz
+
+# Connection Libs
+from sqlalchemy import create_engine
+from sqlalchemy.engine import URL
+
+# Defining palette colours.
+pal = sns.color_palette("cmo.ice", n_colors=12, desat=None)
+initialTime = time.time() # seconds
+
+# Defining plot settings
+SMALL_SIZE = 8
+MEDIUM_SIZE = 10
+BIGGER_SIZE = 12
+
+plt.rc('font', size=SMALL_SIZE, family='Times New Roman')          # controls default text sizes
+plt.rc('axes', titlesize=SMALL_SIZE)     # fontsize of the axes title
+plt.rc('axes', labelsize=SMALL_SIZE)    # fontsize of the x and y labels
+plt.rc('xtick', labelsize=SMALL_SIZE)    # fontsize of the tick labels
+plt.rc('ytick', labelsize=SMALL_SIZE)    # fontsize of the tick labels
+plt.rc('legend', fontsize=SMALL_SIZE)    # legend fontsize
+plt.rc('figure', titlesize=SMALL_SIZE)  # fontsize of the figure title
+
+sns.set()
+# Setting seed for reproducability
+np.random.seed(1234)
+PYTHONHASHSEED = 0
+
+# Path to MS Access database file
+path = r"{dbPath}" #.mdb or .accdb
+
+# Name of Driver from Step 1
+connection_str = r'Driver={Microsoft Access Driver (*.mdb, *.accdb)};'
+connection_str += f'DBQ={path};'
+
+# Create Connection
+connection_url = URL.create("access+pyodbc", query={ "odbc_connect": connection_str })
+engine = create_engine(connection_url)
+
+# Query the PUBLIC DATABASE as a table and store in df
+query = "SELECT * FROM C_IMPORTED_DATA"
+with engine.connect() as con:
+    dfPublicDB = pd.read_sql_query(query, con=con)
+
+    
+# Standardizing  names
+dfPublicDB.columns = ['CYCLE', 'ID','GAUGE','SPEED','TEMP_WHEEL','TPD','ACOUSTIC','WEAR','BANDAGE','FRIEZE','TEMP_BOX','IAM','RAILBAM','IMPACT','T_BOGI','IDENTIFICACAO','ROTATION']
+# Query the LABWARE DATA as a table and store in df
+query = "SELECT w.ID, s.cycle as CYCLE, r.name as NAME, r.formatted_entry as RESULT from c_wm_wheels_id w, sample s, result r where s.status = 'C' and s.sample_number = r.sample_number and w.Serial = s.product_serial  and w.dismantled = 'T' and r.name in ('Gauge Avg','Bandage','Frieze','Speed','TPD','Temp Wheel','Temp Box','Wear','RailBam','IAM','T-Bogi','Impact','Rotation','Acoustic')"
+with engine.connect() as con:
+    dfLW = pd.read_sql_query(query, con=con)
+    
+
+if dfLW.shape[0] > 0:
+    # Standardizing  names
+    dfLW = dfLW.replace("Gauge Avg", "GAUGE")
+    dfLW = dfLW.replace("Temp Box", "TEMP_BOX")
+    dfLW = dfLW.replace("Temp Wheel", "TEMP_WHEEL")
+    dfLW = dfLW.replace("T-Bogi", "T_BOGI")
+    dfLW = dfLW.replace("Bandage", "BANDAGE")
+    dfLW = dfLW.replace("Frieze", "FRIEZE")
+    dfLW = dfLW.replace("Speed", "SPEED")
+    dfLW = dfLW.replace("Wear", "WEAR")
+    dfLW = dfLW.replace("Acoustic", "ACOUSTIC")
+    dfLW = dfLW.replace("RailBam", "RAILBAM")
+    dfLW = dfLW.replace("Impact", "IMPACT")
+    dfLW = dfLW.replace("Rotation", "ROTATION")
+    dfLW = dfLW.replace("Cycle", "CYCLE")
+
+    # Coverting the Results into float data
+    dfLW['RESULT'] = dfLW['RESULT'].str.replace(',', '.')
+    dfLW['RESULT'] = dfLW['RESULT'].astype(float)
+
+    # Dropping duplicates
+    dfLW['KEY_DUPLICATES'] = dfLW['ID'].map(str) + "-" + dfLW['CYCLE'].map(str) + "-" + dfLW['NAME'].map(str)
+    dfLW = dfLW.drop_duplicates(subset='KEY_DUPLICATES', keep='first').drop(columns = ['KEY_DUPLICATES'])
+
+    # Transposing the data
+    dfLW['KEY_PIVOT'] = dfLW['ID'].map(str) + "-" + dfLW['CYCLE'].map(str)
+    dfLW = dfLW.reset_index().pivot(index="KEY_PIVOT", columns="NAME", values="RESULT").fillna(0)
+
+    dfLW = dfLW.reset_index()
+
+    dfLW[['ID', 'CYCLE']] = dfLW.KEY_PIVOT.str.split("-", expand = True)
+    dfLW = dfLW.drop(columns = ['KEY_PIVOT'])
+    dfLW['ID'] = dfLW['ID'].astype(float)
+    dfLW['CYCLE'] = dfLW['CYCLE'].astype(float)
+
+    # Changing the order of columns
+    dfLW = dfLW[
+        ['ID', 'CYCLE', 'GAUGE', 'BANDAGE', 'FRIEZE', 'SPEED', 'TPD', 'TEMP_WHEEL', 'TEMP_BOX', 'WEAR', 'ACOUSTIC',
+         'RAILBAM', 'IAM', 'T_BOGI', 'IMPACT', 'ROTATION']]
+
+    # Ensure the order of the columns will be the same as in the dfLW
+    dfPublicDB = dfPublicDB[
+        ['ID', 'CYCLE', 'GAUGE', 'BANDAGE', 'FRIEZE', 'SPEED', 'TPD', 'TEMP_WHEEL', 'TEMP_BOX', 'WEAR', 'ACOUSTIC',
+         'RAILBAM', 'IAM', 'T_BOGI', 'IMPACT', 'ROTATION']]
+
+    # Merging the previous training data with LabWare data
+    dfMerged = pd.merge(dfLW, dfPublicDB, how='outer')
+
+else:
+    # Ensure the order of the columns will be the same as in the dfLW
+    dfPublicDB = dfPublicDB[
+        ['ID', 'CYCLE', 'GAUGE', 'BANDAGE', 'FRIEZE', 'SPEED', 'TPD', 'TEMP_WHEEL', 'TEMP_BOX', 'WEAR', 'ACOUSTIC',
+         'RAILBAM', 'IAM', 'T_BOGI', 'IMPACT', 'ROTATION']]
+
+    # Merging the previous training data with LabWare data
+    dfMerged = dfPublicDB
+
+# Defining the training data
+train = dfMerged
+
+# This section calculates Remaining Useful Life (RUL) in T-minus notation for the training data
+
+# Find the last cycle per unit number
+targetVar = ['targetRUL']
+indexColumnsNames = ["ID", "CYCLE"]
+dataColumns = train.columns
+featureNames = train.drop(['ID', 'CYCLE'], axis=1).columns
+maxCycle = train.groupby('ID')['CYCLE'].max().reset_index()
+maxCycle.columns = ['ID', 'MaxOfCycle']
+
+# Merge the max cycle back into the original frame
+trainMerged = train.merge(maxCycle, left_on='ID', right_on='ID', how='inner')
+
+# Calculate RUL for each row
+targetRUL = trainMerged["MaxOfCycle"] - trainMerged["CYCLE"]
+trainMerged["targetRUL"] = targetRUL
+
+# Remove unnecessary column
+train_with_target = trainMerged.drop("MaxOfCycle", axis=1)
+
+# Plotting the evolution of features along with the evolution with RUL
+sns.set(font_scale=0.75)
+explore = sns.PairGrid(data=train_with_target,
+                 x_vars=targetVar,
+                 y_vars=['BANDAGE','ACOUSTIC','TPD','TEMP_BOX','RAILBAM'],
+                 hue="ID", palette=pal,aspect=2,diag_sharey=True)
+explore.map(plt.scatter, alpha=0.5)
+explore.set(xlim=(400,0))
+plt.savefig('{visualWorflowPath}images/features.png', format='png')
+
+# Clear out target leakage
+leakage_to_drop = ['ID', 'CYCLE']
+train_no_leakage = train_with_target.drop(leakage_to_drop, axis=1)
+
+# Set up features and target variable
+y = train_no_leakage['targetRUL']
+X = train_no_leakage.drop(['targetRUL'], axis = 1)
+
+# Identify categorical and numeric fields
+categorical = train_no_leakage.select_dtypes(include=['object'])
+numeric = train_no_leakage.select_dtypes(exclude=['object'])
+
+# Create dummy variables (if any categorical fields)
+for name, values in categorical.items():
+    dummies = pd.get_dummies(values.str.strip(), prefix = name, dummy_na=True)
+    numeric = pd.concat([numeric, dummies], axis=1)
+
+# Imputation (if any NULL values)
+for name in numeric:
+    if pd.isnull(numeric[name]).sum() > 0:
+        numeric["%s_mi" % (name)] = pd.isnull(numeric[name])
+        median = numeric[name].median()
+        numeric[name] = numeric[name].apply(lambda x: median if pd.isnull(x) else x)
+y = numeric['targetRUL']
+X = numeric.drop(['targetRUL'], axis = 1)
+
+# Random forest regression
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=61658)
+
+# Choose the model
+rfRegressor = ensemble.RandomForestRegressor()
+rfRegressor.fit(X_train, y_train)
+
+# save random forest
+import joblib
+joblib.dump(rfRegressor, "./rfRegressor.joblib")
+
+# Prediction of test data
+y_pred = rfRegressor.predict(X_test)
+
+# Print on a file the random forest metrics
+mse = round(mean_squared_error(y_test, y_pred),2)
+mae = mean_absolute_error(y_test, y_pred)
+r2 = r2_score(y_test, y_pred)
+accuracy = round(rfRegressor.score(X_train, y_train),2)
+numberSamples = train.shape[0]
+numberWheelsets = len(pd.unique(train['ID']))
+
+line = []
+
+line.append('Regressor Accuracy: ' + str(accuracy))
+line.append('Regressor Mean Squared Error: ' + str(mse))
+line.append('Number of Samples considered: ' + str(numberSamples))
+line.append('Number of Wheelsets considered: ' + str(numberWheelsets))
+
+# Graph feature importance
+featureImp = rfRegressor.feature_importances_
+indices = np.argsort(featureImp)[::-1]
+featureImpRounded = np.around(featureImp, decimals=2)
+
+# List feature importance
+important_features = pd.Series(data=featureImpRounded, index=featureNames)
+important_features.sort_values(ascending=False, inplace=True)
+
+# Creating a seaborn bar plot
+f, ax = plt.subplots(dpi=120)
+ax = sns.barplot(x=important_features, y=important_features.index,palette=pal)
+ax.set_title("Feature Importances")
+ax.tick_params(axis='both', labelsize=8)
+ax.set_yticklabels(important_features.index,fontsize=8)
+ax.set_xlabel("Feature importance score",fontsize=9)
+ax.set_ylabel("Features",fontsize=9)
+plt.savefig('{visualWorflowPath}images/feature_importance.png', format='png')
+
+## Generate decision tree plot - commented for demonstrating purposes
+#os.environ["PATH"] += os.pathsep + 'C:/Program Files (x86)/Graphviz/bin/'
+#fig = plt.figure(figsize=(15, 10))
+#dot_data = export_graphviz(rfRegressor.estimators_[0],
+#                           feature_names=featureNames,
+#                           class_names=targetVar,
+#                           filled=True, impurity=True,
+#                           rounded=True)
+#graph = graphviz.Source(dot_data, format='pdf')
+#graph.render(filename='{visualWorflowPath}documents/tree.pdf')
+
+# Plot actual vs predicted Remaining Useful Life
+biggerPal = sns.color_palette("cmo.ice", n_colors=len(y_test), desat=None)
+f, ax = plt.subplots(dpi=120)
+ax.scatter(y_test, y_pred, c = biggerPal)
+ax.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'b--', lw=2)
+ax.set_xlabel('Actual RUL')
+ax.set_ylabel('Predicted RUL')
+ax.set_title('Remaining Useful Life Actual vs. Predicted')
+plt.savefig('{visualWorflowPath}images/actualvspredictedRUL.png', format='png')
+
+# Classification model
+# generate label columns for training data
+cycles = 15
+train_no_leakage['targetCycles'] = np.where(train_no_leakage['targetRUL'] <= cycles, 1, 0 )
+train_no_leakage.tail(5)
+target_to_drop = ['targetRUL']
+train_final_class = train_no_leakage.drop(target_to_drop, axis=1)
+
+# identify categorical and numeric fields
+categorical = train_final_class.select_dtypes(include=['object'])
+numeric = train_final_class.select_dtypes(exclude=['object'])
+
+# create dummy variables (if any categorical fields)
+for name, values in categorical.items():
+    dummies = pd.get_dummies(values.str.strip(), prefix = name, dummy_na=True)
+    numeric = pd.concat([numeric, dummies], axis=1)
+
+# imputation (if any NULL values)
+for name in numeric:
+    if pd.isnull(numeric[name]).sum() > 0:
+        numeric["%s_mi" % (name)] = pd.isnull(numeric[name])
+        median = numeric[name].median()
+        numeric[name] = numeric[name].apply(lambda x: median if pd.isnull(x) else x)
+y_class = numeric['targetCycles']
+X_class = numeric.drop(['targetCycles'], axis = 1)
+
+
+X_train_class, X_test_class, y_train_class, y_test_class = train_test_split(X_class, y_class, test_size=0.2, random_state=61658)
+
+# Random Forest Classifier
+rfClassifier = ensemble.RandomForestClassifier()
+rfClassifier.fit(X_train_class, y_train_class)
+
+# Save Random Forest Classifier
+joblib.dump(rfClassifier, "./rfClassifier.joblib")
+
+y_pred_class_proba = rfClassifier.predict_proba(X_test_class)[:, 1]
+y_pred_class = rfClassifier.predict(X_test_class)
+
+# Confusion Matrix
+cm = confusion_matrix(y_test_class, y_pred_class, labels=rfClassifier.classes_)
+ConfusionMatrixDisplay.from_estimator(rfClassifier, X_test, y_test_class, cmap=plt.cm.Blues, normalize='true')
+plt.grid(False)
+plt.title('Confusion Matrix')
+plt.savefig('{visualWorflowPath}images/confusion_matrix.png', format='png')
+
+# Measure the performance
+class_accurary = round(accuracy_score(y_test_class, y_pred_class),2)
+class_precision = round(precision_score(y_test_class, y_pred_class),2)
+line.append("Classifier Accuracy: " + str(class_accurary))
+line.append("Classifier Precision: " + str(class_precision))
+
+fpr, tpr, threshold = metrics.roc_curve(y_test_class, y_pred_class_proba)
+roc_auc = metrics.auc(fpr, tpr)
+
+# Calculate and print total execution time process
+finalTime = time.time() # seconds
+
+line.append(f'Total Process Time: {finalTime - initialTime: .2f} seconds')
+file = open("{outFileU}", "w")
+for l in line:
+	file.write(l+',')
+file.close()
